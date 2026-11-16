@@ -32,10 +32,12 @@ Requirements
 | arviz   | ≥ 0.14  |
 | matplotlib | ≥ 3.5 |
 | pyproj  | ≥ 3.0   |
+| pandas  | any (used by `src/profiles/model2d.py`) |
+| GDAL (`osgeo`) | any (used by `src/profiles/plotPro.py`) |
 
 Install dependencies with conda:
 ```bash
-conda install -c conda-forge pymc pytensor arviz numpy scipy matplotlib pyproj
+conda install -c conda-forge pymc pytensor arviz numpy scipy matplotlib pyproj pandas gdal
 ```
 
 
@@ -57,7 +59,7 @@ flower2d/
 │   ├── flower2d/    ← Bayesian MCMC inversion of fault geometries
 │   └── profiles/    ← Profile plotting and ramp estimation tools
 └── examples/
-    ├── haiyuam/     ← Ramp-decollement / flower structure example
+    ├── haiyuan/     ← Ramp-decollement / flower structure example
     └── socal/       ← Southern California multi-structure example
 ```
 
@@ -151,10 +153,12 @@ ref        : [lon, lat] reference origin for UTM projection
 Examples
 =============
 
-**Haiyuan fault** (`examples/haiyuam/`): ramp-decollement or flower structure geometry.
+The input files use paths relative to their `python/` folder (`maindir='../'`), so run them from there.
+
+**Haiyuan fault** (`examples/haiyuan/`): ramp-decollement or flower structure geometry.
 
 ```bash
-cd examples/haiyuam
+cd examples/haiyuan/python
 plotPro.py tianzhuproin.py       # plot profiles
 optimize.py tianzhuwestopti.py   # run MCMC inversion
 ```
@@ -162,7 +166,7 @@ optimize.py tianzhuwestopti.py   # run MCMC inversion
 **Southern California** (`examples/socal/`): imbricated multi-structure geometry.
 
 ```bash
-cd examples/socal
+cd examples/socal/python
 plotPro.py gabrielproin.py
 optimize.py gabrielflower.py
 ```

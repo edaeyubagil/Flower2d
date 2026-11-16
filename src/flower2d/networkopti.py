@@ -720,7 +720,8 @@ class network(object):
                 ramp = self.struc[j].segments[k]
                 
                 # control on locking depths: depth cannot be negatif
-                if (ramp.w < 0.) : # !!!! put after conservation
+                # w=0 causes division by zero in displacement() → NaN logp → sampler stuck
+                if (ramp.w <= 0.) : # !!!! put after conservation
                   return np.ones((self.N,))*1e14
                 # add a condition that ss ramp can not be sup than ss main seg for non infinite seg.
                 if (abs(ramp.ss) > abs(self.fmodel[0].ss) and (ramp.L != 660)) :

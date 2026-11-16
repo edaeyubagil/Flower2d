@@ -469,8 +469,16 @@ def _get_trace(name):
     return trace.posterior[name].values.flatten()
 
 
+def _az_hdi(samples, prob):
+    # ArviZ < 1.0 takes hdi_prob= (and silently ignores prob=); ArviZ >= 1.0 renamed it to prob=
+    try:
+        return az.hdi(samples, hdi_prob=prob)
+    except TypeError:
+        return az.hdi(samples, prob=prob)
+
+
 def hdi(samples, cred_mass=0.95):
-    result = az.hdi(np.array(samples), hdi_prob=cred_mass)
+    result = _az_hdi(np.array(samples), cred_mass)
     return float(result[0]), float(result[1])
 
 

@@ -58,6 +58,14 @@ def filter_to_mode(samples):
     return sel if len(sel) >= 10 else samples
 
 
+def hdi95(samples):
+    # ArviZ < 1.0 takes hdi_prob= (and silently ignores prob=); ArviZ >= 1.0 renamed it to prob=
+    try:
+        return az.hdi(samples, hdi_prob=0.95)
+    except TypeError:
+        return az.hdi(samples, prob=0.95)
+
+
 # ======================================================================================================================
 # Histogram helper
 # ======================================================================================================================
@@ -88,7 +96,7 @@ def histo(ax, post, label, xlabel='', color='steelblue', filter_mode=False):
             color=color, alpha=0.55)
 
     mean   = sel.mean()
-    lo, hi = az.hdi(sel, hdi_prob=0.95)
+    lo, hi = hdi95(sel)
 
     ax.axvline(mean, color='crimson', lw=1.5)
     ax.axvline(lo,   color='crimson', lw=1.0, linestyle='--', alpha=0.7)
@@ -205,11 +213,11 @@ histo(axes2[4], R2_L,     label='Ramp2 L (down-dip)', xlabel='km', color='medium
 histo(axes2[5], R2_depth, label='Ramp2 top depth',    xlabel='km', color='mediumseagreen', filter_mode=filter_mode)
 
 for lbl, trace in [('Ramp1', R1_dip), ('Ramp2', R2_dip)]:
-    print(f'{lbl} dip   — Mean: {trace.mean():.2f}°   HDI: {az.hdi(trace, hdi_prob=0.95)}')
+    print(f'{lbl} dip   — Mean: {trace.mean():.2f}°   HDI: {hdi95(trace)}')
 for lbl, trace in [('Ramp1', R1_L), ('Ramp2', R2_L)]:
-    print(f'{lbl} L     — Mean: {trace.mean():.2f} km  HDI: {az.hdi(trace, hdi_prob=0.95)}')
+    print(f'{lbl} L     — Mean: {trace.mean():.2f} km  HDI: {hdi95(trace)}')
 for lbl, trace in [('Ramp1', R1_depth), ('Ramp2', R2_depth)]:
-    print(f'{lbl} depth — Mean: {trace.mean():.2f} km  HDI: {az.hdi(trace, hdi_prob=0.95)}')
+    print(f'{lbl} depth — Mean: {trace.mean():.2f} km  HDI: {hdi95(trace)}')
 
 fig2.suptitle(f'flower2d — derived ramp geometry{suffix}', fontsize=11)
 out2 = os.path.join(outdir, 'histo_derived.pdf')
