@@ -20,6 +20,13 @@ from profil2d.inversion import GPSSet, InSARSet, exp_cov, sample
 from profil2d.insar import empirical_semivariogram, fit_exponential
 from profil2d.model3d import merged_trace, trace_pieces, make_green, JointModel3D
 
+GRADYAN = dict(yok=(), kaymasiz=("Lxx", "Lyx"), donme=("omega", "Lxx"), tam=("Lxx", "Lyx", "Lxy"))
+
+
+def gradyan(arg):
+    """Hazır ad (yok | kaymasiz | donme | tam) ya da virgüllü liste (Lxx,Lyx,Lxy,omega)."""
+    return GRADYAN[arg] if arg in GRADYAN else tuple(g for g in arg.split(",") if g)
+
 KISA = {"HAVRAN - BALYA FAYI": "HB", "BALIKESİR FAYI": "BF"}
 
 
@@ -50,6 +57,7 @@ def main():
     ap.add_argument("--cell", type=float, default=2.0); ap.add_argument("--sadece-gps", action="store_true")
     ap.add_argument("--nwalkers", type=int, default=32); ap.add_argument("--nsteps", type=int, default=4000)
     ap.add_argument("--burn", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--gradyan", default="yok", help="bölgesel hız alanı: yok | kaymasiz (Lxx,Lyx) | donme (omega,Lxx) | tam (Lxx,Lyx,Lxy) | liste")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
     prof, fy = header(a.gps)
     names = list(fy.keys())
@@ -80,7 +88,8 @@ def main():
 
     t0 = time.time()
     model = JointModel3D(prof.s, prof.n, gps, tracks, green=make_green(xo, yo, geom, a.kurgu), fault_names=names,
-                         bounds=dict(D=(a.Dmin, a.Dmax)))
+                         bounds=dict(D=(a.Dmin, a.Dmax)), gradients=gradyan(a.gradyan))
+    print(f"Bölgesel terimler: a_par, a_perp, b_perp" + "".join(f", {g}" for g in model.gradients))
     print(f"Green fonksiyonları ({len(model._spl.grid)} D değeri, {len(xo):,} nokta) {time.time() - t0:.1f} sn; "
           f"doğrusal olmayan {model.theta_names}; doğrusal {len(model.lin_names)}")
     t0 = time.time()
@@ -100,7 +109,7 @@ def main():
     for k, nm in enumerate(names):
         v = q(V[:, k]); print(f"  V_{KISA.get(nm, nm):14s} {v[0]:8.2f}  [{v[1]:7.2f} … {v[2]:7.2f}]   P(V>0) = {np.mean(V[:, k] > 0):.2f}")
     v = q(Vs); print(f"  V_toplam         {v[0]:8.2f}  [{v[1]:7.2f} … {v[2]:7.2f}]   korelasyon V_1–V_2 = {np.corrcoef(V[:, 0], V[:, 1])[0, 1]:+.2f}")
-    for nm in ("a_par", "a_perp", "b_perp"):
+    for nm in ("a_par", "a_perp", "b_perp") + model.gradients:
         print(f"  {nm:16s} {S_lin[nm]['median']:8.3f}  [{S_lin[nm]['lo']:7.3f} … {S_lin[nm]['hi']:7.3f}]")
 
     th_med = np.median(out["theta"], axis=0); m_med, _ = model.conditional(th_med)
@@ -108,7 +117,7 @@ def main():
     rms = dict(gps_par=float(np.sqrt(np.mean((gps.vpar - pred["gps_par"]) ** 2))), gps_perp=float(np.sqrt(np.mean((gps.vperp - pred["gps_perp"]) ** 2))))
     for t in tracks: rms[t.name] = float(np.sqrt(np.mean((t.los - pred[t.name]) ** 2)))
     print("  rezidüel RMS (mm/yıl): " + ", ".join(f"{k} {v:.2f}" for k, v in rms.items()))
-    res = dict(kurgu=a.kurgu, uzanti=None if a.kurgu == "derin" else a.uzanti, sadece_gps=a.sadece_gps, D_onsel=[a.Dmin, a.Dmax],
+    res = dict(kurgu=a.kurgu, gradyan=list(model.gradients), uzanti=None if a.kurgu == "derin" else a.uzanti, sadece_gps=a.sadece_gps, D_onsel=[a.Dmin, a.Dmax],
                faylar=names, theta=S_th, lin=S_lin, V={KISA.get(nm, nm): q(V[:, k]) for k, nm in enumerate(names)}, V_toplam=q(Vs),
                P_Vpos={KISA.get(nm, nm): float(np.mean(V[:, k] > 0)) for k, nm in enumerate(names)},
                korelasyon_V=float(np.corrcoef(V[:, 0], V[:, 1])[0, 1]), log_marjinal_max=lmax, rms=rms, cov=covinfo,
@@ -124,8 +133,8 @@ def main():
     gx, gy = np.meshgrid(np.linspace(-a.xmax, a.xmax, 81), np.linspace(-a.ymax, a.ymax, 81))
     Ux, Uy, _ = make_green(gx.ravel(), gy.ravel(), geom, a.kurgu)(D_med)
     vpar_map = (Ux @ Vm).reshape(gx.shape); vperp_map = (Uy @ Vm).reshape(gx.shape)
-    ia, ip, ib = (model.lin_names.index(k) for k in ("a_par", "a_perp", "b_perp"))
-    obs_par = gps.vpar - m_med[ia]; obs_perp = gps.vperp - m_med[ip] - m_med[ib] * gps.y
+    ng = len(gps.y); nuis = model.G_gps @ m_med                       # ofset + b_perp + gradyanlar (V sütunları 0)
+    obs_par = gps.vpar - nuis[:ng]; obs_perp = gps.vperp - nuis[ng:]
     fig, ax = plt.subplots(1, 2, figsize=(16, 7.5))
     lim = np.abs(vpar_map).max()
     for j, (fld, ttl) in enumerate(((vpar_map, "model faya paralel hız"), (vperp_map, "model faya dik hız"))):
@@ -141,10 +150,10 @@ def main():
         ax[j].set_title(ttl); ax[j].set_xlabel("x (km, doğrultu boyunca)"); ax[j].set_ylabel("y (km, + kuzey)")
     sc = 6.0
     ax[0].quiver(gps.x, gps.y, obs_par, obs_perp, color="#1f6feb", scale=sc, scale_units="inches", width=.004, label="GPS − nuisance")
-    ax[0].quiver(gps.x, gps.y, pred["gps_par"] - m_med[ia], pred["gps_perp"] - m_med[ip] - m_med[ib] * gps.y, color="#cf222e",
+    ax[0].quiver(gps.x, gps.y, pred["gps_par"] - nuis[:ng], pred["gps_perp"] - nuis[ng:], color="#cf222e",
                  scale=sc, scale_units="inches", width=.003, label="model (fay)")
     ax[0].legend(loc="lower left", fontsize=8)
-    fig.suptitle(f"3B '{a.kurgu}'" + ("" if a.kurgu == "derin" else f" (uzantı {a.uzanti:g} km)")
+    fig.suptitle(f"3B '{a.kurgu}', gradyan {a.gradyan}" + ("" if a.kurgu == "derin" else f" (uzantı {a.uzanti:g} km)")
                  + f": D={D_med:.1f} km, " + ", ".join(f"V_{KISA.get(nm, nm)}={Vm[k]:.2f}" for k, nm in enumerate(names)) + " mm/yıl")
     fig.tight_layout(); fig.savefig(f"{a.out}/harita.png", dpi=100); plt.close(fig)
 
@@ -162,17 +171,16 @@ def main():
             curves.append(cache[Dk][0] @ out["lin"][i, :model.K])
         curves = np.array(curves)
         b = np.abs(gps.x - x0) <= 15
-        ax[0, c_].errorbar(gps.y[b], obs_par[b], yerr=np.sqrt(gps.spar[b] ** 2 + np.exp(th_med[1]) ** 2), fmt="o", ms=4, color="#1f6feb", label="GPS paralel − a_par")
+        ax[0, c_].errorbar(gps.y[b], obs_par[b], yerr=np.sqrt(gps.spar[b] ** 2 + np.exp(th_med[1]) ** 2), fmt="o", ms=4, color="#1f6feb", label="GPS paralel − bölgesel terimler")
         ax[0, c_].fill_between(yy, *np.percentile(curves, [2.5, 97.5], 0), color="#1a7f37", alpha=.25, label="3B model %95")
         ax[0, c_].plot(yy, np.median(curves, 0), color="#1a7f37", lw=2)
         ax[0, c_].set_title(f"x = {x0:+.0f} km (±15 km bant)")
         if tracks:
             tr = tracks[0]; bb = np.abs(tr.x - x0) <= 15
-            jj = model.K + 3
-            h = tr.los - (m_med[jj] + m_med[jj + 1] * tr.x + m_med[jj + 2] * tr.y) - (tr.pE * prof.n[0] + tr.pN * prof.n[1]) * m_med[ib] * tr.y
+            h = tr.los - model._fixed_cols("insar", 0) @ m_med               # rampa + b_perp + gradyanlar
             bins = np.arange(-a.ymax, a.ymax + .1, 4.0); mid = .5 * (bins[1:] + bins[:-1])
             med = [np.median(h[bb & (tr.y >= l) & (tr.y < u)]) if np.any(bb & (tr.y >= l) & (tr.y < u)) else np.nan for l, u in zip(bins[:-1], bins[1:])]
-            ax[1, c_].plot(tr.y[bb], h[bb], ".", ms=2, color="0.6"); ax[1, c_].plot(mid, med, "o-", color="#bf8700", ms=4, label="yatay − rampa − dik terim (4 km medyan)")
+            ax[1, c_].plot(tr.y[bb], h[bb], ".", ms=2, color="0.6"); ax[1, c_].plot(mid, med, "o-", color="#bf8700", ms=4, label="yatay − rampa − bölgesel terimler (4 km medyan)")
             kap = np.median(tr.pE * prof.n[0] + tr.pN * prof.n[1])
             Ux_s, Uy_s, _ = Gs(D_med)
             ax[1, c_].plot(yy, Ux_s @ Vm + kap * (Uy_s @ Vm), color="#1a7f37", lw=2, label="model (q·u, medyan κ)")

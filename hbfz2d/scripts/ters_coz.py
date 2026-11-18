@@ -176,12 +176,12 @@ def main():
         dd = tr.los - ramp - perp
         med = [np.median(dd[(tr.y >= b0) & (tr.y < b1)]) if np.any((tr.y >= b0) & (tr.y < b1)) else np.nan for b0, b1 in zip(bins[:-1], bins[1:])]
         sp = np.mean(tr.pE * prof.s[0] + tr.pN * prof.s[1]); pu = np.mean(tr.pU)
-        u = hat_basis(yy, knots) @ m_med[model.K + 3 + 3 * len(tracks):]
+        u = hat_basis(yy, knots) @ m_med[model.iu]
         ax[2].plot(mid, med, "o-", ms=3, label=f"{tr.name}: veri − rampa − dik terim (4 km medyan)")
         ax[2].plot(yy, sp * np.median(curves, 0) + pu * u, "--", lw=1.5, label=f"{tr.name}: model (fay + düşey)")
     ax[2].set_ylabel("LOS mm/yıl"); ax[2].legend(fontsize=7)
     if has_u:
-        u_draws = np.array([hat_basis(yy, knots) @ out["lin"][i, model.K + 3 + 3 * len(tracks):] for i in pick])
+        u_draws = np.array([hat_basis(yy, knots) @ out["lin"][i, model.iu] for i in pick])
         ax[3].fill_between(yy, np.percentile(u_draws, 2.5, 0), np.percentile(u_draws, 97.5, 0), color="#bf8700", alpha=.3)
         ax[3].plot(yy, np.median(u_draws, 0), color="#bf8700", lw=2, label="düşey nuisance u(y) (iki izin ortağı)")
         ax[3].set_ylabel("mm/yıl"); ax[3].set_xlabel("y (km, + kuzey)"); ax[3].legend(fontsize=8)

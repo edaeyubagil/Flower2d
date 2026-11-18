@@ -167,10 +167,10 @@ class JointModel3D(JointModel):
     theta = [D, log σ_taban_par, log σ_taban_perp, log s_iz...];  doğrusal: [V_1..V_K, a_par, a_perp, b_perp,
     rampalar..., u...] (2B ile aynı adlar). D sınırları bounds['D'] (düzgün önsel)."""
 
-    def __init__(self, s, n, gps, tracks, green, fault_names, knots=(), prior_sd=None, bounds=None, dlog=0.02):
+    def __init__(self, s, n, gps, tracks, green, fault_names, knots=(), prior_sd=None, bounds=None, dlog=0.02, gradients=()):
         self.green, self.fault_names = green, list(fault_names)
         super().__init__(s, n, gps, tracks, faults=[dict(name=nm) for nm in self.fault_names],
-                         knots=np.asarray(knots, float), prior_sd=prior_sd, bounds=bounds)
+                         knots=np.asarray(knots, float), prior_sd=prior_sd, bounds=bounds, gradients=gradients)
         self.theta_names = ["D", "log_floor_par", "log_floor_perp"] + [f"log_s_{t.name}" for t in self.tracks]
         ng = len(self.gps.y)
         self._rows = np.cumsum([0, ng] + [len(t.y) for t in self.tracks])

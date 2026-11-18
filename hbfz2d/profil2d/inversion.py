@@ -55,15 +55,29 @@ def hat_basis(y, knots):
     return np.clip(1.0 - np.abs(np.subtract.outer(y, knots)) / h, 0.0, None)
 
 
-DEFAULT_PRIOR_SD = dict(V=10.0, a_par=50.0, a_perp=50.0, b_perp=0.2, c0=20.0, cx=0.5, cy=0.5, u=10.0)
+DEFAULT_PRIOR_SD = dict(V=10.0, a_par=50.0, a_perp=50.0, b_perp=0.2, c0=20.0, cx=0.5, cy=0.5, u=10.0, grad=0.2)
 DEFAULT_BOUNDS = dict(D=(0.5, 40.0), y0=(-10.0, 10.0), log_floor=(np.log(0.05), np.log(5.0)), log_s=(np.log(0.1), np.log(10.0)))
+
+# İsteğe bağlı bölgesel hız alanı terimleri (mm/yıl/km; profil çerçevesi x = s, y = n; b_perp = dv_perp/dy her zaman var):
+#   Lxx   = dv_par/dx              Lxy = dv_par/dy (faya paralel kayma: fay sinyaliyle en çok ödünleşen terim)
+#   Lyx   = dv_perp/dx             omega: rijit dönme, v = (−ω y, +ω x)  (x→y saat yönü tersi; ω > 0 saat yönü tersine)
+# GPS satırlarına doğrudan, iz satırlarına q·v olarak (q = (s·p, n·p)) girer. lin_names'in SONUNA eklenir.
+GRADIENTS = ("Lxx", "Lyx", "Lxy", "omega")
+_GRAD_PAR = dict(Lxx=("x", 1.0), Lxy=("y", 1.0), omega=("y", -1.0))     # v_par katkısı
+_GRAD_PERP = dict(Lyx=("x", 1.0), omega=("x", 1.0))                     # v_perp katkısı
 
 
 class JointModel:
-    def __init__(self, s, n, gps, tracks, faults, knots, prior_sd=None, bounds=None):
+    def __init__(self, s, n, gps, tracks, faults, knots, prior_sd=None, bounds=None, gradients=()):
         self.s, self.n = np.asarray(s, float), np.asarray(n, float)
         self.gps, self.tracks, self.faults = gps, list(tracks), [dict(f) for f in faults]
         self.knots = np.asarray(knots, float)
+        self.gradients = tuple(gradients)
+        bad = [g for g in self.gradients if g not in GRADIENTS]
+        if bad:
+            raise ValueError(f"bilinmeyen gradyan terimi {bad}; seçenekler {GRADIENTS} (dv_perp/dy = b_perp zaten var)")
+        if self.gradients and len(gps.y) > 0 and gps.x is None:
+            raise ValueError("gradyan terimleri GPS x konumlarını (GPSSet.x) gerektirir")
         self.psd = dict(DEFAULT_PRIOR_SD, **(prior_sd or {}))
         self.bounds = dict(DEFAULT_BOUNDS, **(bounds or {}))
         K, T = len(self.faults), len(self.tracks)
@@ -71,15 +85,28 @@ class JointModel:
                             + ["log_floor_par", "log_floor_perp"] + [f"log_s_{t.name}" for t in self.tracks])
         self.lin_names = ([f"V_{k+1}" for k in range(K)] + ["a_par", "a_perp", "b_perp"]
                           + [f"{c}_{t.name}" for t in self.tracks for c in ("c0", "cx", "cy")]
-                          + [f"u_{m}" for m in range(len(self.knots))])
+                          + [f"u_{m}" for m in range(len(self.knots))] + list(self.gradients))
         self.K, self.T = K, T
         self.nlin = len(self.lin_names)
+        iu = K + 3 + 3 * T
+        self.iu = slice(iu, iu + len(self.knots))                          # düşey şapka tabanı katsayıları
+        self.ig = iu + len(self.knots)                                     # ilk gradyan sütunu
         sd = [self.psd["V"]] * K + [self.psd["a_par"], self.psd["a_perp"], self.psd["b_perp"]]
         sd += [self.psd[c] for _ in self.tracks for c in ("c0", "cx", "cy")] + [self.psd["u"]] * len(self.knots)
+        sd += [self.psd["grad"]] * len(self.gradients)
         self.prior_sd = np.array(sd, float)
         self._prep()
 
     # ---- sabit (theta'dan bağımsız) kısımlar ----
+    def _grad_fields(self, x, y):
+        """Her gradyan terimi için birim katsayılı (v_par, v_perp) alanı."""
+        xy = dict(x=x, y=y); out = []
+        for g in self.gradients:
+            vp = _GRAD_PAR[g][1] * xy[_GRAD_PAR[g][0]] if g in _GRAD_PAR else np.zeros_like(x)
+            vn = _GRAD_PERP[g][1] * xy[_GRAD_PERP[g][0]] if g in _GRAD_PERP else np.zeros_like(x)
+            out.append((vp, vn))
+        return out
+
     def _fixed_cols(self, which, t=None):
         """V sütunları hariç tasarım matrisi (V sütunları sıfır bırakılır)."""
         K = self.K
@@ -88,14 +115,20 @@ class JointModel:
             G = np.zeros((2 * ng, self.nlin))
             G[:ng, K + 0] = 1.0
             G[ng:, K + 1] = 1.0; G[ng:, K + 2] = g.y
+            if self.gradients and ng:
+                for j, (vp, vn) in enumerate(self._grad_fields(np.asarray(g.x, float), np.asarray(g.y, float))):
+                    G[:ng, self.ig + j] = vp; G[ng:, self.ig + j] = vn
             return G
         tr = self.tracks[t]; ni = len(tr.y)
         G = np.zeros((ni, self.nlin))
+        sp_ = tr.pE * self.s[0] + tr.pN * self.s[1]
         np_ = tr.pE * self.n[0] + tr.pN * self.n[1]
         G[:, K + 2] = np_ * tr.y
         j = K + 3 + 3 * t
         G[:, j], G[:, j + 1], G[:, j + 2] = 1.0, tr.x, tr.y
-        G[:, K + 3 + 3 * self.T:] = tr.pU[:, None] * hat_basis(tr.y, self.knots)
+        G[:, self.iu] = tr.pU[:, None] * hat_basis(tr.y, self.knots)
+        for jj, (vp, vn) in enumerate(self._grad_fields(tr.x, tr.y)):
+            G[:, self.ig + jj] = sp_ * vp + np_ * vn
         return G
 
     def _prep(self):

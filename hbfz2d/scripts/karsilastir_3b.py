@@ -13,12 +13,12 @@ from scipy.optimize import minimize
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..")); sys.path.insert(0, os.path.dirname(__file__))
 from ters_coz import header
-from ters_coz_3b import geometry
+from ters_coz_3b import geometry, gradyan
 from profil2d.inversion import GPSSet
 from profil2d.model3d import make_green, JointModel3D
 
 
-def bilesen_testi(gps_path, faults, Dmin, Dmax, xmax, ymax):
+def bilesen_testi(gps_path, faults, Dmin, Dmax, xmax, ymax, grads=()):
     prof, fy = header(gps_path); names = list(fy)
     g = np.genfromtxt(gps_path, delimiter=",", comments="#", dtype=None, encoding="utf-8", skip_header=2,
                       names=["site", "lon", "lat", "x", "y", "ve", "vn", "se", "sn", "rho", "vpar", "vperp", "spar", "sperp", "rpp"])
@@ -31,7 +31,7 @@ def bilesen_testi(gps_path, faults, Dmin, Dmax, xmax, ymax):
             spar = g["spar"][k] if bil != "dik" else np.full(k.sum(), 1e3)
             sperp = g["sperp"][k] if bil != "paralel" else np.full(k.sum(), 1e3)
             gps = GPSSet(y=g["y"][k], x=g["x"][k], vpar=g["vpar"][k], vperp=g["vperp"][k], spar=spar, sperp=sperp)
-            m = JointModel3D(prof.s, prof.n, gps, [], green=make_green(gps.x, gps.y, geom, kurgu), fault_names=names, bounds=dict(D=(Dmin, Dmax)))
+            m = JointModel3D(prof.s, prof.n, gps, [], green=make_green(gps.x, gps.y, geom, kurgu), fault_names=names, bounds=dict(D=(Dmin, Dmax)), gradients=grads)
             f = lambda t: -m.log_post(t) if np.isfinite(m.log_post(t)) else 1e30
             best = min((minimize(f, [D0, np.log(.7), np.log(1.9)], method="Nelder-Mead", options=dict(xatol=1e-4, fatol=1e-4, maxiter=4000))
                         for D0 in np.linspace(Dmin + .1 * (Dmax - Dmin), Dmax - .1 * (Dmax - Dmin), 3)), key=lambda r: r.fun)
@@ -47,7 +47,7 @@ def main():
     ap.add_argument("--iki-b", help="2B tek-fay çözüm dizini (ters_coz.py çıktısı), V_1 karşılaştırma için")
     ap.add_argument("--Dmin", type=float, default=10.0); ap.add_argument("--Dmax", type=float, default=15.0)
     ap.add_argument("--xmax", type=float, default=50.0); ap.add_argument("--ymax", type=float, default=50.0)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True); ap.add_argument("--gradyan", default="yok")
     a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
 
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
@@ -65,11 +65,11 @@ def main():
         ozet["2B tek fay"] = dict(V_toplam=[float(np.median(v)), float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))])
         ax.hist(v, bins=bins, histtype="stepfilled", alpha=.25, color="0.3", density=True, label=f"2B tek fay: {np.median(v):.2f} [{np.percentile(v, 2.5):.2f}, {np.percentile(v, 97.5):.2f}]")
     ax.set_xlabel("V toplam = V_HB + V_BF (mm/yıl, + sağ-yanal)"); ax.set_ylabel("olasılık yoğunluğu"); ax.legend(fontsize=8); ax.grid(alpha=.3)
-    ax.set_title(f"GPS + yatay InSAR, D ~ U[{a.Dmin:g}, {a.Dmax:g}] km")
+    ax.set_title(f"GPS + yatay InSAR, D ~ U[{a.Dmin:g}, {a.Dmax:g}] km, gradyan {a.gradyan}")
     fig.tight_layout(); fig.savefig(f"{a.out}/V_toplam.png", dpi=110)
 
-    bt = bilesen_testi(a.gps, a.faults, a.Dmin, a.Dmax, a.xmax, a.ymax)
-    print("GPS-yalnız, en büyük log p(d|θ) ve o noktadaki V_toplam (koşullu ortalama ± sd):")
+    bt = bilesen_testi(a.gps, a.faults, a.Dmin, a.Dmax, a.xmax, a.ymax, gradyan(a.gradyan))
+    print(f"[gradyan {a.gradyan}] GPS-yalnız, en büyük log p(d|θ) ve o noktadaki V_toplam (koşullu ortalama ± sd):")
     for label, r in bt.items():
         print(f"  {label:17s} " + " | ".join(f"{b}: {r[b]['logp']:8.2f}  V {r[b]['V_toplam']:6.2f}±{r[b]['sd']:.2f}" for b in ("ikisi", "paralel", "dik")))
     json.dump(dict(kosular=ozet, bilesen_testi=bt), open(f"{a.out}/ozet.json", "w"), ensure_ascii=False, indent=1)

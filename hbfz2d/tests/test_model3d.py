@@ -288,3 +288,71 @@ def test_model3d_sampler_smoke():
     out = sample(m, nwalkers=10, nsteps=30, burn=10, seed=0, ndraw_lin=40)
     assert out["theta"].shape[1] == 4 and np.all((out["theta"][:, 0] >= 10) & (out["theta"][:, 0] <= 15))
     assert np.all(np.isfinite(out["logp"]))
+
+
+# ------------------------------------------------------------------------------------------
+# bölgesel hız gradyanı / dönme (isteğe bağlı doğrusal nuisance)
+# ------------------------------------------------------------------------------------------
+def test_regional_gradient_columns_and_dense():
+    """Lxx = dv_par/dx, Lxy = dv_par/dy, Lyx = dv_perp/dx, omega: rijit dönme (v_par = −ω y, v_perp = +ω x;
+    x→y saat yönü tersi). İz satırları q·v. Gradyanlar lin_names'in SONUNA eklenir (eski indeksler korunur)."""
+    gps, tracks, x, y = synthetic3d(ng=7, ni=12, seed=6)
+    grads = ("Lxx", "Lyx", "Lxy", "omega")
+    m0 = _model(gps, tracks, x, y)
+    m = JointModel3D(S, N, gps, tracks, green=make_green(x, y, GEOM, "blok"), fault_names=["A", "B"],
+                     bounds=dict(D=(10.0, 15.0)), gradients=grads)
+    assert m.lin_names[:len(m0.lin_names)] == m0.lin_names and m.lin_names[len(m0.lin_names):] == list(grads)
+    theta = np.array([m._spl.grid[2], np.log(0.6), np.log(1.4), np.log(0.9)])
+    G, d, C, Psd = m.dense(theta)
+    ng = 7; i = {g: m.lin_names.index(g) for g in grads}
+    xg, yg = gps.x, gps.y
+    assert np.allclose(G[:ng, i["Lxx"]], xg) and np.allclose(G[ng:2 * ng, i["Lxx"]], 0)
+    assert np.allclose(G[:ng, i["Lxy"]], yg) and np.allclose(G[ng:2 * ng, i["Lxy"]], 0)
+    assert np.allclose(G[:ng, i["Lyx"]], 0) and np.allclose(G[ng:2 * ng, i["Lyx"]], xg)
+    assert np.allclose(G[:ng, i["omega"]], -yg) and np.allclose(G[ng:2 * ng, i["omega"]], xg)
+    tr = tracks[0]; qp, qn = tr.pE, tr.pN                                 # S = doğu, N = kuzey
+    Gt = G[2 * ng:]
+    assert np.allclose(Gt[:, i["Lxx"]], qp * tr.x) and np.allclose(Gt[:, i["Lyx"]], qn * tr.x)
+    assert np.allclose(Gt[:, i["Lxy"]], qp * tr.y) and np.allclose(Gt[:, i["omega"]], -qp * tr.y + qn * tr.x)
+    ref = multivariate_normal(mean=np.zeros(len(d)), cov=C + G @ np.diag(Psd ** 2) @ G.T).logpdf(d)
+    assert m.log_marginal(theta) == pytest.approx(ref, rel=1e-9, abs=1e-6)
+    # önsel: sıfır ortalamalı, sd = 0.2 mm/yıl/km (≈ ±10 mm/yıl 50 km'de; ~11°/Myr dönme), değiştirilebilir
+    assert np.allclose(Psd[[i[g] for g in grads]], 0.2)
+    m5 = JointModel3D(S, N, gps, tracks, green=make_green(x, y, GEOM, "blok"), fault_names=["A", "B"],
+                      bounds=dict(D=(10.0, 15.0)), gradients=grads, prior_sd=dict(grad=0.05))
+    assert np.allclose(m5.prior_sd[[i[g] for g in grads]], 0.05)
+
+
+def test_regional_gradients_in_2d_model_and_requires_x():
+    gps, tracks, x, y = synthetic3d(ng=7, ni=12, seed=6)
+    m2 = JointModel(S, N, gps, tracks, faults=[dict(y0=1.0, free=False)], knots=np.array([]), gradients=("Lyx", "omega"))
+    G, d, C, Psd = m2.dense(np.array([12.0, np.log(.5), np.log(.5), 0.0]))
+    assert np.allclose(G[7:14, m2.lin_names.index("Lyx")], gps.x)
+    ref = multivariate_normal(mean=np.zeros(len(d)), cov=C + G @ np.diag(Psd ** 2) @ G.T).logpdf(d)
+    assert m2.log_marginal(np.array([12.0, np.log(.5), np.log(.5), 0.0])) == pytest.approx(ref, rel=1e-9, abs=1e-6)
+    gps.x = None
+    with pytest.raises(ValueError):
+        JointModel(S, N, gps, tracks, faults=[dict(y0=1.0, free=False)], knots=np.array([]), gradients=("Lxx",))
+    with pytest.raises(ValueError):
+        JointModel(S, N, gps, tracks, faults=[dict(y0=1.0, free=False)], knots=np.array([]), gradients=("Lyy",))
+
+
+def test_regional_gradients_recovered_with_fault():
+    """Fay + dönme + Lxx + Lyx ile üretilmiş veri: gradyanlı model V toplamını ve gradyanları 3σ içinde geri
+    alır; gradyansız model aynı veride belirgin biçimde daha kötü uyar."""
+    V, om, lxx, lyx = (2.0, 1.0), 0.02, 0.01, -0.015
+    gps, tracks, x, y = synthetic3d(V=V, seed=9, gps_sd=0.3)
+    tr = tracks[0]
+    gps.vpar = gps.vpar + lxx * gps.x - om * gps.y
+    gps.vperp = gps.vperp + lyx * gps.x + om * gps.x
+    tr.los = tr.los + tr.pE * (lxx * tr.x - om * tr.y) + tr.pN * (lyx * tr.x + om * tr.x)
+    th = np.array([12.0, np.log(0.3), np.log(0.3), 0.0])
+    g = make_green(x, y, GEOM, "blok")
+    m = JointModel3D(S, N, gps, tracks, green=g, fault_names=["A", "B"], bounds=dict(D=(10.0, 15.0)), gradients=("Lxx", "Lyx", "omega"))
+    mean, cov = m.conditional(th)
+    for nm, true in (("Lxx", lxx), ("Lyx", lyx), ("omega", om)):
+        j = m.lin_names.index(nm); assert abs(mean[j] - true) < 3 * np.sqrt(cov[j, j])
+    sd_s = np.sqrt(cov[0, 0] + cov[1, 1] + 2 * cov[0, 1])
+    assert abs(mean[0] + mean[1] - 3.0) < 3 * sd_s
+    m0 = JointModel3D(S, N, gps, tracks, green=g, fault_names=["A", "B"], bounds=dict(D=(10.0, 15.0)))
+    assert m.log_marginal(th) > m0.log_marginal(th) + 10.0
