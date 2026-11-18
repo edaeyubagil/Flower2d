@@ -27,6 +27,7 @@ class GPSSet:
     vperp: np.ndarray
     spar: np.ndarray
     sperp: np.ndarray
+    x: np.ndarray = None          # yalnız 3B model (model3d) için gerekli
 
 
 @dataclass
@@ -48,6 +49,8 @@ def exp_cov(x, y, sigma, lam, nugget=0.0):
 
 
 def hat_basis(y, knots):
+    if len(knots) == 0:
+        return np.zeros((len(y), 0))
     h = np.diff(knots)[0]
     return np.clip(1.0 - np.abs(np.subtract.outer(y, knots)) / h, 0.0, None)
 
@@ -137,22 +140,36 @@ class JointModel:
         return np.r_[np.full(ng, sf[0] ** 2), np.full(ng, sf[1] ** 2)]
 
     def _vcols(self, y, D, y0):
-        return np.stack([np.arctan((y - y0[k]) / D[k]) / np.pi for k in range(self.K)], axis=1)
+        return np.stack([np.arctan((y - y0[k]) / D[k]) / np.pi for k in range(self.K)], axis=1).reshape(len(y), self.K)
+
+    # ---- fay (V) sütunları: alt sınıflar (model3d.JointModel3D) bunları değiştirir ----
+    def _fault_columns(self, theta):
+        """V = 1 için fay katkısı: (GPS [paralel; dik] (2ng, K), [iz t için (n_t, K)])."""
+        D, y0, *_ = self.unpack(theta)
+        ng = len(self.gps.y)
+        Vg = np.r_[self._vcols(self.gps.y, D, y0), np.zeros((ng, self.K))]
+        Vt = [pre["sp"][:, None] * self._vcols(tr.y, D, y0) for tr, pre in zip(self.tracks, self.tr_pre)]
+        return Vg, Vt
+
+    def _fault_columns_white(self, theta):
+        """Aynı sütunlar; InSAR kısmı C0'ın Cholesky çarpanıyla beyazlatılmış (L⁻¹ V)."""
+        Vg, Vt = self._fault_columns(theta)
+        return Vg, [solve_triangular(pre["L"], v, lower=True) for v, pre in zip(Vt, self.tr_pre)]
 
     def _normal_eq(self, theta):
         D, y0, sf, s = self.unpack(theta)
+        Vg, WVt = self._fault_columns_white(theta)
         A = np.diag(1.0 / self.prior_sd ** 2); b = np.zeros(self.nlin); quad = 0.0; logdet = 0.0; ntot = 0
         # GPS (köşegen)
-        G = self.G_gps.copy(); ng = len(self.gps.y)
-        G[:ng, :self.K] = self._vcols(self.gps.y, D, y0)
+        G = self.G_gps.copy()
+        G[:, :self.K] = Vg
         w = 1.0 / (self.s2_gps + self._floor2(sf))
         A += G.T @ (G * w[:, None]); b += G.T @ (w * self.d_gps); quad += np.sum(w * self.d_gps ** 2)
         logdet += np.sum(np.log(1.0 / w)); ntot += len(w)
         # InSAR (beyazlatılmış, ölçekli)
         for t, pre in enumerate(self.tr_pre):
-            tr = self.tracks[t]
             WG = pre["WG"].copy()
-            WG[:, :self.K] = solve_triangular(pre["L"], pre["sp"][:, None] * self._vcols(tr.y, D, y0), lower=True)
+            WG[:, :self.K] = WVt[t]
             f = 1.0 / s[t] ** 2
             A += f * (WG.T @ WG); b += f * (WG.T @ pre["Wd"]); quad += f * (pre["Wd"] @ pre["Wd"])
             logdet += pre["logdet0"] + 2 * pre["n"] * np.log(s[t]); ntot += pre["n"]
@@ -176,24 +193,25 @@ class JointModel:
 
     def predict(self, theta, m):
         """Ortalama tahminler: dict(gps_par, gps_perp, <iz>) aynı veri sırasıyla."""
-        D, y0, sf, s = self.unpack(theta)
+        Vg, Vt = self._fault_columns(theta)
         G = self.G_gps.copy(); ng = len(self.gps.y)
-        G[:ng, :self.K] = self._vcols(self.gps.y, D, y0)
+        G[:, :self.K] = Vg
         pg = G @ m; out = dict(gps_par=pg[:ng], gps_perp=pg[ng:])
         for t, tr in enumerate(self.tracks):
             Gt = self._fixed_cols("insar", t)
-            Gt[:, :self.K] = self.tr_pre[t]["sp"][:, None] * self._vcols(tr.y, D, y0)
+            Gt[:, :self.K] = Vt[t]
             out[tr.name] = Gt @ m
         return out
 
     def dense(self, theta):
         """Test için: tam G, d, C ve önsel sd (yoğun formülle karşılaştırma)."""
         D, y0, sf, s = self.unpack(theta)
+        Vg, Vt = self._fault_columns(theta)
         Gs, ds, Cs = [], [], []
-        G = self.G_gps.copy(); ng = len(self.gps.y); G[:ng, :self.K] = self._vcols(self.gps.y, D, y0)
+        G = self.G_gps.copy(); G[:, :self.K] = Vg
         Gs.append(G); ds.append(self.d_gps); Cs.append(np.diag(self.s2_gps + self._floor2(sf)))
         for t, tr in enumerate(self.tracks):
-            Gt = self._fixed_cols("insar", t); Gt[:, :self.K] = self.tr_pre[t]["sp"][:, None] * self._vcols(tr.y, D, y0)
+            Gt = self._fixed_cols("insar", t); Gt[:, :self.K] = Vt[t]
             Gs.append(Gt); ds.append(tr.los); Cs.append(s[t] ** 2 * tr.cov0)
         from scipy.linalg import block_diag
         return np.vstack(Gs), np.concatenate(ds), block_diag(*Cs), self.prior_sd
@@ -209,7 +227,7 @@ def sample(model, nwalkers=32, nsteps=3000, burn=1000, thin=1, seed=0, ndraw_lin
     if start is None:
         start = []
         for nm in model.theta_names:
-            start.append(float(np.mean(model.bounds["D"])) if nm.startswith("D_") else 0.0 if nm.startswith("y0") else np.log(0.5) if nm.startswith("log_floor") else 0.0)
+            start.append(float(np.mean(model.bounds["D"])) if (nm == "D" or nm.startswith("D_")) else 0.0 if nm.startswith("y0") else np.log(0.5) if nm.startswith("log_floor") else 0.0)
         start = np.array(start)
         r = minimize(lambda th: -model.log_post(th) if np.isfinite(model.log_post(th)) else 1e30, start, method="Nelder-Mead",
                      options=dict(maxiter=4000, xatol=1e-3, fatol=1e-3))
