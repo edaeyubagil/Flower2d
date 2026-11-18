@@ -113,3 +113,19 @@ def fit_exponential(h, gam, npair):
     p0 = [np.sqrt(max(gam.max(), 1e-6)), max(h.max() / 4, 1e-3), np.sqrt(max(gam.min(), 1e-6))]
     p, _ = curve_fit(f, h, gam, p0=p0, sigma=1 / np.sqrt(npair), bounds=([0, 1e-3, 0], [np.inf, np.inf, np.inf]), maxfev=20000)
     return dict(sigma=float(p[0]), **{"lambda": float(p[1])}, nugget=float(p[2]))
+
+
+def combine_tracks(los_a, p_a, los_d, p_d, s):
+    """İki izi düşeyden arındırılmış faya paralel yatay bileşene birleştirir (aynı hücrelerde).
+
+    h = (u_d·LOS_a − u_a·LOS_d) / (u_d·s_a − u_a·s_d),  s_t = p_t,yatay · s,  u_t = p_t,düşey.
+    Düşey hız TAM olarak elenir (varsayım gerekmez). h = v_yatay · q, burada q·s = 1 ve
+    κ = q·n küçük bir faya dik sızmadır. İzlerin düzlemsel rampaları da birleşerek bir düzlem olur.
+    p_a, p_d: (3, N) yer->uydu birim vektörleri. Dönüş: (h, q[2, N])."""
+    p_a, p_d = np.asarray(p_a, float), np.asarray(p_d, float)
+    sa = p_a[0] * s[0] + p_a[1] * s[1]; sd = p_d[0] * s[0] + p_d[1] * s[1]
+    ua, ud = p_a[2], p_d[2]
+    den = ud * sa - ua * sd
+    h = (ud * np.asarray(los_a, float) - ua * np.asarray(los_d, float)) / den
+    q = (ud * p_a[:2] - ua * p_d[:2]) / den
+    return h, q

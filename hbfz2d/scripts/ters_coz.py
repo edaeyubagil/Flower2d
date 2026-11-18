@@ -7,6 +7,7 @@ Kullanım:
       [--nwalkers 32] [--nsteps 4000] [--burn 1500]
 --model tek : tek fay, konumu (y0) serbest [-15, 15] km
 --model iki : profil başlığındaki iki fay konumunda iki fay (konumlar sabit)
+--yatay     : (A) iki izi düşeyi tam eleyen kombinasyonla faya paralel yatay bileşene birleştir; InSAR tek veri seti olur
 """
 import argparse, json, os, re, sys, time
 import numpy as np
@@ -14,7 +15,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from profil2d.geometry import Profile
 from profil2d.inversion import GPSSet, InSARSet, JointModel, exp_cov, sample, hat_basis
-from profil2d.insar import empirical_semivariogram, fit_exponential
+from profil2d.insar import empirical_semivariogram, fit_exponential, combine_tracks
 
 
 def header(path):
@@ -39,6 +40,26 @@ def load_insar(path, xmax, ymax, cell):
     return name, r[:, 0], r[:, 1], r[:, 2], r[:, 3], r[:, 4], r[:, 5], len(los)
 
 
+def yatay_dataset(tracks, prof, cell, ymax):
+    """(A) İki izin ortak hücrelerinde düşeyi tam eleyen kombinasyon (profil2d.insar.combine_tracks).
+    Dönüş: (InSARSet 'yatay' [pE,pN = q, pU = 0], yarıvariogram parametreleri, κ = q·n)."""
+    ta, td = tracks
+    key = lambda t: {(int(np.floor(xx / cell)), int(np.floor(yy / cell))): i for i, (xx, yy) in enumerate(zip(t.x, t.y))}
+    ka, kd = key(ta), key(td); com = sorted(set(ka) & set(kd))
+    ia, id_ = np.array([ka[k] for k in com]), np.array([kd[k] for k in com])
+    pa = np.array([ta.pE[ia], ta.pN[ia], ta.pU[ia]]); pd = np.array([td.pE[id_], td.pN[id_], td.pU[id_]])
+    h_, q = combine_tracks(ta.los[ia], pa, td.los[id_], pd, prof.s)
+    x, y = 0.5 * (ta.x[ia] + td.x[id_]), 0.5 * (ta.y[ia] + td.y[id_])
+    far = np.abs(y) >= ymax / 2
+    A = np.c_[np.ones(far.sum()), x[far], y[far]]; c, *_ = np.linalg.lstsq(A, h_[far], rcond=None)
+    hh, gam, npair = empirical_semivariogram(x[far], y[far], h_[far] - A @ c, bins=np.arange(0, 42, 2.0), max_pairs=None)
+    par = fit_exponential(hh, gam, npair)
+    kap = q[0] * prof.n[0] + q[1] * prof.n[1]
+    ds = InSARSet(name="yatay", x=x, y=y, los=h_, pE=q[0], pN=q[1], pU=np.zeros(len(h_)),
+                  cov0=exp_cov(x, y, par["sigma"], par["lambda"], max(par["nugget"], 0.1)))
+    return ds, par, kap
+
+
 def summarize(samples, names, label):
     out = {}
     for j, nm in enumerate(names):
@@ -55,6 +76,7 @@ def main():
     ap.add_argument("--cell", type=float, default=2.0); ap.add_argument("--knot", type=float, default=10.0)
     ap.add_argument("--nwalkers", type=int, default=32); ap.add_argument("--nsteps", type=int, default=4000)
     ap.add_argument("--burn", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--yatay", action="store_true", help="A: iki izi düşeyden arındırılmış yatay bileşene birleştir")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     prof, fy = header(a.gps)
@@ -76,6 +98,13 @@ def main():
         C0 = exp_cov(x, y, par["sigma"], par["lambda"], max(par["nugget"], 0.1))
         tracks.append(InSARSet(name=name, x=x, y=y, los=los, pE=pE, pN=pN, pU=pU, cov0=C0))
         print(f"  InSAR {name}: 1 km blok {n1:,} -> {a.cell:g} km hücre {len(los):,};  C0: σ={par['sigma']:.2f} mm/yıl, λ={par['lambda']:.1f} km, nugget={par['nugget']:.2f}")
+
+    if a.yatay:
+        # A seçeneği: iki izi düşeyden arındırılmış faya paralel yatay bileşene birleştir
+        assert len(tracks) == 2, "--yatay iki iz ister"
+        ds, par, kap = yatay_dataset(tracks, prof, a.cell, a.ymax); tracks = [ds]; covinfo = {"yatay": par}
+        print(f"  A: düşeyden arındırılmış yatay bileşen, ortak hücre {len(ds.los):,}; κ (faya dik sızma) medyan {np.median(kap):+.3f};"
+              f" C0: σ={par['sigma']:.2f}, λ={par['lambda']:.1f} km, nugget={par['nugget']:.2f} mm/yıl")
 
     if a.model == "tek":
         faults = [dict(y0=float(np.mean(list(fy.values()))), free=True, y0_bounds=(-15.0, 15.0))]
@@ -124,7 +153,7 @@ def main():
     def vpar_curve(theta, m):
         D, y0, *_ = model.unpack(theta)
         return sum(m[k] * np.arctan((yy - y0[k]) / D[k]) / np.pi for k in range(model.K))
-    pick = np.random.default_rng(1).choice(len(out["theta"]), 300, replace=False)
+    pick = np.random.default_rng(1).choice(len(out["theta"]), min(300, len(out["theta"])), replace=False)
     curves = np.array([vpar_curve(out["theta"][i], out["lin"][i]) for i in pick])
     fig, ax = plt.subplots(4, 1, figsize=(10, 13), sharex=True)
     ia = model.lin_names.index("a_par")

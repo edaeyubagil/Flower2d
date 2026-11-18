@@ -96,3 +96,24 @@ def test_semivariogram_recovers_exponential_parameters():
     h, gam, npair = empirical_semivariogram(x, y, z, bins=np.arange(0, 60, 3.0), max_pairs=None)
     p = fit_exponential(h, gam, npair)
     assert p["sigma"] == pytest.approx(sig, rel=0.35) and p["lambda"] == pytest.approx(lam, rel=0.5)
+
+
+def test_vertical_free_combination():
+    """h = (u_d·LOS_a − u_a·LOS_d)/(u_d·s_a − u_a·s_d): düşeyden bağımsız, faya paralel katsayısı 1."""
+    from profil2d.insar import combine_tracks
+    rng = np.random.default_rng(11)
+    s = np.array([np.sin(np.deg2rad(76.4)), np.cos(np.deg2rad(76.4))])
+    n = np.array([-s[1], s[0]])
+    N_ = 50
+    pa = np.array([los_unit_vector_mintpy(rng.uniform(33, 47), rng.uniform(98, 101)) for _ in range(N_)]).T
+    pd = np.array([los_unit_vector_mintpy(rng.uniform(29, 44), rng.uniform(-101, -99)) for _ in range(N_)]).T
+    v = rng.normal(0, 5, (3, N_))
+    la, ld = np.sum(pa * v, 0), np.sum(pd * v, 0)
+    h, q = combine_tracks(la, pa, ld, pd, s)
+    assert np.allclose(q[0] * s[0] + q[1] * s[1], 1.0)                    # faya paralel katsayısı 1
+    assert np.allclose(h, q[0] * v[0] + q[1] * v[1])                        # tam doğru (düşey yok)
+    v2 = v.copy(); v2[2] += rng.normal(0, 20, N_)                           # yalnız düşeyi değiştir
+    h2, _ = combine_tracks(np.sum(pa * v2, 0), pa, np.sum(pd * v2, 0), pd, s)
+    assert np.allclose(h, h2)                                               # düşey tamamen elenir
+    kappa = q[0] * n[0] + q[1] * n[1]
+    assert np.all(np.abs(kappa) < 1.0)                                      # faya dik sızma küçük ama sıfır değil

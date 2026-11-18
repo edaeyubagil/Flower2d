@@ -5,13 +5,13 @@ Kullanım: python scripts/katki_testi.py --gps local/gps_profil.csv --insar A.cs
 import argparse, json, os, sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..")); sys.path.insert(0, os.path.dirname(__file__))
-from ters_coz import header, load_insar
+from ters_coz import header, load_insar, yatay_dataset
 from profil2d.inversion import GPSSet, InSARSet, JointModel, exp_cov, sample
 from profil2d.insar import empirical_semivariogram, fit_exponential
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--gps", required=True); ap.add_argument("--insar", action="append", default=[])
-ap.add_argument("--veri", choices=["gps", "insar"], required=True); ap.add_argument("--out", required=True)
+ap.add_argument("--veri", choices=["gps", "insar", "yatay"], required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--nsteps", type=int, default=4000); ap.add_argument("--burn", type=int, default=1500)
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
 prof, fy = header(a.gps)
@@ -20,7 +20,7 @@ g = np.genfromtxt(a.gps, delimiter=",", comments="#", dtype=None, encoding="utf-
 kg = (np.abs(g["x"]) <= 50) & (np.abs(g["y"]) <= 50)
 if a.veri == "gps":
     gps = GPSSet(y=g["y"][kg], vpar=g["vpar"][kg], vperp=g["vperp"][kg], spar=g["spar"][kg], sperp=g["sperp"][kg]); tracks = []
-else:
+else:   # insar ya da yatay: GPS yok
     gps = GPSSet(y=np.zeros(0), vpar=np.zeros(0), vperp=np.zeros(0), spar=np.zeros(0), sperp=np.zeros(0)); tracks = []
     for p in a.insar:
         name, x, y, los, pE, pN, pU, _ = load_insar(p, 50, 50, 2.0)
@@ -28,6 +28,8 @@ else:
         h, gam, npair = empirical_semivariogram(x[far], y[far], los[far] - A @ c, bins=np.arange(0, 42, 2.0), max_pairs=None)
         par = fit_exponential(h, gam, npair)
         tracks.append(InSARSet(name, x, y, los, pE, pN, pU, exp_cov(x, y, par["sigma"], par["lambda"], max(par["nugget"], 0.1))))
+    if a.veri == "yatay":
+        tracks = [yatay_dataset(tracks, prof, 2.0, 50.0)[0]]
 model = JointModel(prof.s, prof.n, gps, tracks, faults=[dict(y0=float(np.mean(list(fy.values()))), free=True, y0_bounds=(-15.0, 15.0))],
                    knots=np.arange(-50, 50.1, 10.0))
 out = sample(model, nwalkers=32, nsteps=a.nsteps, burn=a.burn, seed=0, ndraw_lin=4000)
