@@ -209,7 +209,7 @@ def sample(model, nwalkers=32, nsteps=3000, burn=1000, thin=1, seed=0, ndraw_lin
     if start is None:
         start = []
         for nm in model.theta_names:
-            start.append(10.0 if nm.startswith("D_") else 0.0 if nm.startswith("y0") else np.log(0.5) if nm.startswith("log_floor") else 0.0)
+            start.append(float(np.mean(model.bounds["D"])) if nm.startswith("D_") else 0.0 if nm.startswith("y0") else np.log(0.5) if nm.startswith("log_floor") else 0.0)
         start = np.array(start)
         r = minimize(lambda th: -model.log_post(th) if np.isfinite(model.log_post(th)) else 1e30, start, method="Nelder-Mead",
                      options=dict(maxiter=4000, xatol=1e-3, fatol=1e-3))

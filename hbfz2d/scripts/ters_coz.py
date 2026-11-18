@@ -77,6 +77,7 @@ def main():
     ap.add_argument("--nwalkers", type=int, default=32); ap.add_argument("--nsteps", type=int, default=4000)
     ap.add_argument("--burn", type=int, default=1500); ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--yatay", action="store_true", help="A: iki izi düşeyden arındırılmış yatay bileşene birleştir")
+    ap.add_argument("--Dmin", type=float, default=0.5); ap.add_argument("--Dmax", type=float, default=40.0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     prof, fy = header(a.gps)
@@ -111,7 +112,8 @@ def main():
     else:
         faults = [dict(y0=v, free=False, name=k) for k, v in fy.items()]
     knots = np.arange(-a.ymax, a.ymax + 0.1, a.knot)
-    model = JointModel(prof.s, prof.n, gps, tracks, faults=faults, knots=knots)
+    model = JointModel(prof.s, prof.n, gps, tracks, faults=faults, knots=knots, bounds=dict(D=(a.Dmin, a.Dmax)))
+    print(f"D önseli: düzgün [{a.Dmin:g}, {a.Dmax:g}] km")
     print(f"Model '{a.model}': doğrusal olmayan {model.theta_names}; doğrusal {len(model.lin_names)} parametre (analitik integre)")
 
     t0 = time.time()
@@ -155,7 +157,8 @@ def main():
         return sum(m[k] * np.arctan((yy - y0[k]) / D[k]) / np.pi for k in range(model.K))
     pick = np.random.default_rng(1).choice(len(out["theta"]), min(300, len(out["theta"])), replace=False)
     curves = np.array([vpar_curve(out["theta"][i], out["lin"][i]) for i in pick])
-    fig, ax = plt.subplots(4, 1, figsize=(10, 13), sharex=True)
+    has_u = any(np.any(t.pU != 0) for t in tracks)
+    fig, ax = plt.subplots(4 if has_u else 3, 1, figsize=(10, 13 if has_u else 10), sharex=True)
     ia = model.lin_names.index("a_par")
     ax[0].errorbar(gps.y, gps.vpar - m_med[ia], yerr=np.sqrt(gps.spar ** 2 + sf[0] ** 2), fmt="o", ms=4, color="#1f6feb", label="GPS faya paralel − a_par")
     ax[0].fill_between(yy, np.percentile(curves, 2.5, 0), np.percentile(curves, 97.5, 0), color="#1a7f37", alpha=.25, label="model %95")
@@ -164,6 +167,7 @@ def main():
     ib = model.lin_names.index("b_perp"); ip = model.lin_names.index("a_perp")
     ax[1].errorbar(gps.y, gps.vperp, yerr=np.sqrt(gps.sperp ** 2 + sf[1] ** 2), fmt="o", ms=4, color="#8250df", label="GPS faya dik")
     ax[1].plot(yy, m_med[ip] + m_med[ib] * yy, "k-", label="model (bölgesel doğrusal)"); ax[1].set_ylabel("mm/yıl"); ax[1].legend(fontsize=8)
+    ax[-1].set_xlabel("y (km, + kuzey)")
     bins = np.arange(-a.ymax, a.ymax + 0.1, 4.0); mid = 0.5 * (bins[1:] + bins[:-1])
     for t, tr in enumerate(tracks):
         j = model.K + 3 + 3 * t
@@ -176,10 +180,11 @@ def main():
         ax[2].plot(mid, med, "o-", ms=3, label=f"{tr.name}: veri − rampa − dik terim (4 km medyan)")
         ax[2].plot(yy, sp * np.median(curves, 0) + pu * u, "--", lw=1.5, label=f"{tr.name}: model (fay + düşey)")
     ax[2].set_ylabel("LOS mm/yıl"); ax[2].legend(fontsize=7)
-    u_draws = np.array([hat_basis(yy, knots) @ out["lin"][i, model.K + 3 + 3 * len(tracks):] for i in pick])
-    ax[3].fill_between(yy, np.percentile(u_draws, 2.5, 0), np.percentile(u_draws, 97.5, 0), color="#bf8700", alpha=.3)
-    ax[3].plot(yy, np.median(u_draws, 0), color="#bf8700", lw=2, label="düşey nuisance u(y) (iki izin ortağı)")
-    ax[3].set_ylabel("mm/yıl"); ax[3].set_xlabel("y (km, + kuzey)"); ax[3].legend(fontsize=8)
+    if has_u:
+        u_draws = np.array([hat_basis(yy, knots) @ out["lin"][i, model.K + 3 + 3 * len(tracks):] for i in pick])
+        ax[3].fill_between(yy, np.percentile(u_draws, 2.5, 0), np.percentile(u_draws, 97.5, 0), color="#bf8700", alpha=.3)
+        ax[3].plot(yy, np.median(u_draws, 0), color="#bf8700", lw=2, label="düşey nuisance u(y) (iki izin ortağı)")
+        ax[3].set_ylabel("mm/yıl"); ax[3].set_xlabel("y (km, + kuzey)"); ax[3].legend(fontsize=8)
     for f in fy.values():
         for x_ in ax: x_.axvline(f, ls="--", color="0.5", lw=.8)
     for x_ in ax: x_.grid(alpha=.3)

@@ -13,6 +13,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--gps", required=True); ap.add_argument("--insar", action="append", default=[])
 ap.add_argument("--veri", choices=["gps", "insar", "yatay"], required=True); ap.add_argument("--out", required=True)
 ap.add_argument("--nsteps", type=int, default=4000); ap.add_argument("--burn", type=int, default=1500)
+ap.add_argument("--Dmin", type=float, default=0.5); ap.add_argument("--Dmax", type=float, default=40.0)
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True)
 prof, fy = header(a.gps)
 g = np.genfromtxt(a.gps, delimiter=",", comments="#", dtype=None, encoding="utf-8", skip_header=2,
@@ -31,7 +32,7 @@ else:   # insar ya da yatay: GPS yok
     if a.veri == "yatay":
         tracks = [yatay_dataset(tracks, prof, 2.0, 50.0)[0]]
 model = JointModel(prof.s, prof.n, gps, tracks, faults=[dict(y0=float(np.mean(list(fy.values()))), free=True, y0_bounds=(-15.0, 15.0))],
-                   knots=np.arange(-50, 50.1, 10.0))
+                   knots=np.arange(-50, 50.1, 10.0), bounds=dict(D=(a.Dmin, a.Dmax)))
 out = sample(model, nwalkers=32, nsteps=a.nsteps, burn=a.burn, seed=0, ndraw_lin=4000)
 D, V = out["theta"][:, 0], out["lin"][:, 0]
 res = dict(veri=a.veri, V=[float(np.median(V)), float(np.percentile(V, 2.5)), float(np.percentile(V, 97.5))],
